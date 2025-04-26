@@ -108,6 +108,24 @@ class LocalFeatureTransformer(nn.Module):
         cross_layer = AG_RoPE_EncoderLayer(config['d_model'], config['nhead'], config['agg_size0'], config['agg_size1'],
                                             config['no_flash'], False, config['npe'], self.fp32)
         self.layers = nn.ModuleList([copy.deepcopy(self_layer) if _ == 'self' else copy.deepcopy(cross_layer) for _ in self.layer_names])
+        
+        # --- early-stop: confidence heads ---------------------------------
+        self.depth_conf = self.full_config['coarse'].get('depth_confidence', -1)
+        n_layers = len(self.layers)
+        print(f"LoFTR: {self.depth_conf=}, {n_layers=}")
+        if self.depth_conf > 0:          # -1  → disabled
+            self.conf_heads = nn.ModuleList(
+                [nn.Sequential(nn.Conv2d(self.d_model, 1, 1), nn.Sigmoid())
+                for _ in range(n_layers - 1)]        # no head for final layer
+            )
+            # same exponential schedule as LightGlue
+            self.conf_thr = [0.8 + 0.1 * np.exp(-4.0 * i / n_layers)
+                            for i in range(n_layers - 1)]
+
+            #  initialize confidence heads
+            for head in self.conf_heads:
+                nn.init.constant_(head[0].bias, 10.)   # sigmoid≈1 → early exit after layer 0
+        
         self._reset_parameters()
 
     def _reset_parameters(self):
@@ -146,6 +164,44 @@ class LocalFeatureTransformer(nn.Module):
                 feat1 = layer(feat1, feat0, mask1, mask0)                
             else:
                 raise KeyError
+
+            if self.training:                     # skip during inference
+                with torch.no_grad():             # labels, no gradient
+                    # 1. compute soft match matrix *now*
+                    sim_now = torch.einsum(
+                        'nlc,nsc->nls',
+                        feat0.flatten(2).transpose(1,2),
+                        feat1.flatten(2).transpose(1,2)
+                    ) / np.sqrt(feat0.size(1))
+                    sim_now = F.softmax(sim_now,1) * F.softmax(sim_now,2)
+
+                data.setdefault('sim_inter', []).append(sim_now.detach())
+                data.setdefault('conf_out0', []).append(self.conf_heads[i](feat0.detach()))
+                data.setdefault('conf_out1', []).append(self.conf_heads[i](feat1.detach()))
+
+            # early stop check
+            if self.depth_conf > 0 and i < len(self.layers) - 1:
+                # simple per-pixel confidence
+                conf0 = self.conf_heads[i](feat0).flatten(1)   # [B, H*W]
+                conf1 = self.conf_heads[i](feat1).flatten(1)
+                thr = self.conf_thr[i]
+                n_conf = ((conf0 >= thr).sum() + (conf1 >= thr).sum()).item()
+                ratio  = n_conf / float(conf0.numel() + conf1.numel())
+                # print(f"Layer {i+1}: {n_conf} / {conf0.numel() + conf1.numel()} = {ratio:.2f} > {thr:.2f}")
+                if ratio >= self.depth_conf:   # matches LightGlue’s rule
+                    print(f"Early stop at layer {i+1} of {len(self.layers) - 1} with ratio {ratio:.2f} >= {self.depth_conf:.2f}")
+                    break
+
+        if self.training:
+            # final reference assignment
+            with torch.no_grad():
+                sim_final = torch.einsum(
+                    'nlc,nsc->nls',
+                    feat0.flatten(2).transpose(1,2),
+                    feat1.flatten(2).transpose(1,2)
+                ) / np.sqrt(feat0.size(1))
+                sim_final = F.softmax(sim_final,1) * F.softmax(sim_final,2)
+            data['sim_final'] = sim_final.detach()
 
         if feature_cropped:
             # padding feature

@@ -30,6 +30,27 @@ class LoFTRLoss(nn.Module):
         self.local_regress_temperature = self.config['loftr']['match_fine']['local_regress_temperature']
         
 
+    def confidence_bce(conf0, conf1, sim_now, sim_final):
+        """
+        BCE loss that teaches conf_heads to say “my match is final”.
+        Args
+            conf0, conf1 : [B, N, 1] logits from confidence heads (detach OK)
+            sim_now      : [B, N, M] log-probs (or softmax) at current layer
+            sim_final    : [B, N, M] reference from the *last* layer
+        """
+        # best partner index for every point
+        idx_row_now  = sim_now.argmax(-1)             # [B, N]
+        idx_row_fin  = sim_final.argmax(-1)
+        idx_col_now  = sim_now.argmax(-2)             # [B, M]
+        idx_col_fin  = sim_final.argmax(-2)
+
+        lbl0 = (idx_row_now == idx_row_fin).float()   # 1 if stable
+        lbl1 = (idx_col_now == idx_col_fin).float()
+
+        bce = F.binary_cross_entropy_with_logits
+        return 0.5 * (bce(conf0.squeeze(-1), lbl0) +
+                    bce(conf1.squeeze(-1), lbl1))
+
     def compute_coarse_loss(self, conf, conf_gt, weight=None, overlap_weight=None):
         """ Point-wise CE / Focal Loss with 0 / 1 confidence as gt.
         Args:
@@ -197,6 +218,19 @@ class LoFTRLoss(nn.Module):
         else:
             assert self.training is False
             loss_scalars.update({'loss_f': torch.tensor(1.)})  # 1 is the upper bound
+
+        if 'conf_out0' in data and 'sim_inter' in data and 'sim_final' in data:
+            loss_conf = 0.0
+            for c0, c1, sim_now in zip(data['conf_out0'],
+                                    data['conf_out1'],
+                                    data['sim_inter']):
+                loss_conf += confidence_bce(c0, c1, sim_now, data['sim_final'])
+            loss_conf = loss_conf / max(1, len(data['sim_inter']))
+
+            # weight from cfg  (add LOSS.CONF_WEIGHT = 0.1 to default.py)
+            w_conf = self.loss_config.get('conf_weight', 0.1)
+            loss  += w_conf * loss_conf
+            loss_scalars.update({"loss_conf": loss_conf.detach().cpu()})
 
         # 3. subpixel-level loss (second-stage refinement)
         # we calculate subpixel-level loss for all pixel-level gt

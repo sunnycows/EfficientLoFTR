@@ -66,6 +66,8 @@ _CN.LOFTR.LOSS.FINE_TYPE = 'l2_with_std'  # ['l2_with_std', 'l2']
 _CN.LOFTR.LOSS.FINE_WEIGHT = 1.0
 _CN.LOFTR.LOSS.FINE_CORRECT_THR = 1.0  # for filtering valid fine-level gts (some gt matches might fall out of the fine-level window)
 
+# confidence loss
+_CN.LOSS.CONF_WEIGHT = 0.1    # default; set 0 to disable
 
 ##############  Dataset  ##############
 _CN.DATASET = CN()
@@ -174,6 +176,8 @@ _CN.TRAINER.GRADIENT_CLIPPING = 0.5
 # are used during training on ScanNet. (60M pairs of images sampled during traing from 230M pairs in total.)
 _CN.TRAINER.SEED = 66
 
+# Early stopping
+# _CN.LOFTR.COARSE.DEPTH_CONFIDENCE = 0.95    # early-stop ratio, −1 disables
 
 def get_cfg_defaults():
     """Get a yacs CfgNode object with default values for my_project."""

@@ -56,6 +56,13 @@ class PL_LoFTR(pl.LightningModule):
 
         # Matcher: LoFTR
         self.matcher = LoFTR(config=_config['loftr'], profiler=self.profiler)
+        
+        # --- freeze backbone & keep conf_heads trainable -------------
+        for p in self.matcher.parameters():
+            p.requires_grad_(False)
+        for head in self.matcher.loftr_coarse.conf_heads:
+            head.requires_grad_(True)
+
         self.loss = LoFTRLoss(_config)
 
         # Pretrained weights
@@ -72,10 +79,17 @@ class PL_LoFTR(pl.LightningModule):
         self.total_ms = 0
 
     def configure_optimizers(self):
-        # FIXME: The scheduler did not work properly when `--resume_from_checkpoint`
-        optimizer = build_optimizer(self, self.config)
-        scheduler = build_scheduler(self.config, optimizer)
-        return [optimizer], [scheduler]
+        # Training only confidence heads
+        
+        # # FIXME: The scheduler did not work properly when `--resume_from_checkpoint`
+        # optimizer = build_optimizer(self, self.config)
+        # scheduler = build_scheduler(self.config, optimizer)
+        # return [optimizer], [scheduler]
+        
+        heads = self.matcher.loftr_coarse.conf_heads
+        params = (p for h in heads for p in h.parameters() if p.requires_grad)
+        opt = torch.optim.AdamW(params, lr=3e-4, weight_decay=0.)
+        return opt        #  no scheduler needed for a 2-epoch run
     
     def optimizer_step(
             self, epoch, batch_idx, optimizer, optimizer_idx,
