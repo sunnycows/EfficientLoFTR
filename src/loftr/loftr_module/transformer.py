@@ -8,6 +8,7 @@ from collections import OrderedDict
 from ..utils.position_encoding import RoPEPositionEncodingSine
 import numpy as np
 from loguru import logger    
+import math
 
 class AG_RoPE_EncoderLayer(nn.Module):
     def __init__(self,
@@ -123,8 +124,10 @@ class LocalFeatureTransformer(nn.Module):
                         for i in range(n_layers - 1)]
 
         #  initialize confidence heads
-        # for head in self.conf_heads:
-        #     nn.init.constant_(head[0].bias, 10.)   # sigmoid≈1 → early exit after layer 0
+        p0 = 0.6
+        logit_bias = math.log(p0 / (1 - p0))
+        for head in self.conf_heads:
+            nn.init.constant_(head[0].bias, p0)
         
         self._reset_parameters()
 
@@ -175,12 +178,29 @@ class LocalFeatureTransformer(nn.Module):
                     ) / np.sqrt(feat0.size(1))
                     sim_now = F.softmax(sim_now,1) * F.softmax(sim_now,2)
 
+                    q = data.setdefault('sim_queue', [])
+                    q.append(sim_now.detach())          # push this layer
+                    if len(q) >= 4:                     # have ℓ-3 and ℓ   now
+                        data.setdefault('sim_pairs', [])\
+                            .append((q[-4], q[-1]))     #   (ℓ-3, ℓ)
+                    if len(q) > 4:                      # keep only the last 4
+                        q.pop(0)
+
+                prev = data.get('sim_prev')                 # None for layer-0
+                data['sim_prev'] = sim_now.detach()         # store for next iter
+
+                if prev is not None:                        # we have ℓ   and ℓ-1
+                    data.setdefault('sim_pairs', []).append((prev, sim_now.detach()))
                 data.setdefault('sim_inter', []).append(sim_now.detach())
                 data.setdefault('conf_out0', []).append(self.conf_heads[i](feat0.detach()))
                 data.setdefault('conf_out1', []).append(self.conf_heads[i](feat1.detach()))
 
             # early stop check
+            # print("self.depth_conf", self.depth_conf)
             if self.depth_conf > 0 and i < len(self.layers) - 1:
+                print("Early stop check at layer", i+1)
+                if i == 6:
+                    break
                 # simple per-pixel confidence
                 conf0 = self.conf_heads[i](feat0).flatten(1)   # [B, H*W]
                 conf1 = self.conf_heads[i](feat1).flatten(1)
@@ -188,6 +208,7 @@ class LocalFeatureTransformer(nn.Module):
                 n_conf = ((conf0 >= thr).sum() + (conf1 >= thr).sum()).item()
                 ratio  = n_conf / float(conf0.numel() + conf1.numel())
                 # print(f"Layer {i+1}: {n_conf} / {conf0.numel() + conf1.numel()} = {ratio:.2f} > {thr:.2f}")
+                print(f"Layer {i+1}: {ratio}")
                 if ratio >= self.depth_conf:   # matches LightGlue’s rule
                     print(f"Early stop at layer {i+1} of {len(self.layers) - 1} with ratio {ratio:.2f} >= {self.depth_conf:.2f}")
                     break

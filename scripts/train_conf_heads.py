@@ -8,8 +8,8 @@ from src.utils.misc import lower_config
 from torch.nn import functional as F
 import pandas as pd
 
-# PAIR_ROOT   = '../_Experiments/clean_patches'
-PAIR_ROOT = '../../Data/AirSim/Ch1'
+PAIR_ROOT   = '../_Experiments/clean_patches'
+AIRSIM_ROOT = '../../Data/AirSim/Ch1'
 CKPT_PATH   = 'weights/eloftr_outdoor.ckpt'
 
 class PairDataset(Dataset):
@@ -63,6 +63,7 @@ class AirSimDataset(Dataset):
 
         df = pd.read_csv(os.path.join(root, 'pair_csv', 'pair_list_' + suffix + '.csv'))
         df = df[df['label'] == 1]
+        df = df[:5000]  
         self.A = [os.path.join(root, p) for p in df['image0'].tolist()]
         self.B = [os.path.join(root, p) for p in df['image1'].tolist()]
 
@@ -173,20 +174,30 @@ class ConfHeadTrainer(pl.LightningModule):
         _ = self.matcher(batch)
         return batch  
 
-    # def on_after_backward(self):        # <-- new hook
-    #     # print one scalar per conf-head weight tensor
-    #     for n, p in self.named_parameters():
-    #         if 'conf_heads' in n and p.grad is not None:
-    #             mean_grad = p.grad.abs().mean().item()
-    #             print(f'{n}: {mean_grad:.3e}')
-    #     # optional: print a blank line to separate batches
-    #     print('─' * 40)
+    def on_after_backward(self):
+
+        # sim_prev, sim_now = self._cached_pair
+        # lbl0 = (sim_prev.argmax(-1) == sim_now.argmax(-1)).float()
+        # pos  = lbl0.mean().item()
+
+        # grad = []
+        # for n,p in model.named_parameters():
+        #     if 'conf_heads' in n and p.grad is not None:
+        #         grad.append(p.grad.abs().mean().item())
+        # print(f'grad mean: {sum(grad)/len(grad):.2e}', 'label pos:', lbl0.mean().item())
+
+        conf0_last = self._last_out['conf_out0'][-1]      # [B,1,Hc,Wc]
+        prob = torch.sigmoid(conf0_last).mean().item()
+        # print(f'(logit) = {prob:.3f}')
 
     def training_step(self, batch, _):
         self.matcher.coarse_matching.eval()        # ← disables padding branch
         self.matcher.loftr_coarse.train()        #  ← add this line
         self.matcher.fine_matching.eval()        #  ←  add this line
         out = self(batch)                    # forward pass
+
+        # self._cached_pair = out['sim_pairs'][0]   # keep only first to save RAM
+        self._last_out = out                # <-- keep for the hook
 
         loss = self._conf_loss(out)
         self.log('train/loss_conf', loss)
@@ -198,43 +209,53 @@ class ConfHeadTrainer(pl.LightningModule):
         self.log('val/loss_conf', loss, prog_bar=True)
 
     # --------------------------------------------------------------
-    def confidence_bce(self, conf0, conf1, sim_now, sim_final):
+    def confidence_bce(self, conf0, conf1, sim_prev, sim_now):
         """
-        BCE loss that teaches conf_heads to say “my match is final”.
-        Args
-            conf0, conf1 : [B, N, 1] logits from confidence heads (detach OK)
-            sim_now      : [B, N, M] log-probs (or softmax) at current layer
-            sim_final    : [B, N, M] reference from the *last* layer
+        conf0, conf1 : [B, 1, Hc, Wc] logits from the confidence heads
+        sim_prev     : [B, N, M]  soft match matrix at layer ℓ-1
+        sim_now      : [B, N, M]  soft match matrix at layer ℓ
+        Returns      : scalar BCE loss for this layer
         """
-        # best partner index for every point
-        idx_row_now  = sim_now.argmax(-1)          # [B, N]
-        idx_row_fin  = sim_final.argmax(-1)
-        idx_col_now  = sim_now.argmax(-2)
-        idx_col_fin  = sim_final.argmax(-2)
+        B, _, Hc, Wc = conf0.shape
+        N = Hc * Wc
 
-        lbl0 = (idx_row_now == idx_row_fin).float()   # [B, N]
-        lbl1 = (idx_col_now == idx_col_fin).float()
+        # ---- build 1-step stability labels -----------------------
+        idx_r0 = sim_prev.argmax(-1)     # [B, N]
+        idx_r1 = sim_now.argmax(-1)
+        idx_c0 = sim_prev.argmax(-2)
+        idx_c1 = sim_now.argmax(-2)
 
-        # ----- reshape logits to [B, N] --------------------------------
-        logit0 = conf0.flatten(2).squeeze(1)      # [B, N]
-        logit1 = conf1.flatten(2).squeeze(1)      # [B, N]
+        lbl0 = (idx_r0 == idx_r1).float()    # stable row match?
+        lbl1 = (idx_c0 == idx_c1).float()    # stable column match?
+
+        # ---- reshape logits to match label shape ----------------
+        log0 = conf0.flatten(2).squeeze(1)   # [B, N]
+        log1 = conf1.flatten(2).squeeze(1)
+
+        # ---- class-balanced BCE ---------------------------------
+        pos_w0 = lbl0.numel() / (lbl0.sum() + 1e-6)
+        pos_w1 = lbl1.numel() / (lbl1.sum() + 1e-6)
 
         bce = F.binary_cross_entropy_with_logits
-        return 0.5 * (bce(logit0, lbl0) + bce(logit1, lbl1))
+        loss0 = bce(log0, lbl0) #, pos_weight=pos_w0)
+        loss1 = bce(log1, lbl1) #, pos_weight=pos_w1)
+
+        return 0.5 * (loss0 + loss1)
 
     def _conf_loss(self, out):
         loss = 0.0
-        for c0, c1, sim_now in zip(out['conf_out0'],
-                                   out['conf_out1'],
-                                   out['sim_inter']):
-            sim_final = out.get('sim_final', sim_now.detach())   # fall-back if key is absent
-            loss += self.confidence_bce(c0, c1, sim_now, sim_final)
-        return loss / max(1, len(out['sim_inter']))
+        pairs = out['sim_pairs']                 # length = L-3
+        for (sim_prev, sim_now), c0, c1 in zip(
+                pairs,
+                out['conf_out0'][3:],            # align with ℓ   side
+                out['conf_out1'][3:]):
 
-    # --------------------------------------------------------------
+            loss += self.confidence_bce(c0, c1, sim_prev, sim_now)
+        return loss / max(1, len(pairs))
+        
     def configure_optimizers(self):
         params = filter(lambda p: p.requires_grad, self.parameters())
-        return torch.optim.AdamW(params, lr=3e-3, weight_decay=0.)
+        return torch.optim.AdamW(params, lr=6e-3, weight_decay=0.)
 
 
 cfg = get_cfg_defaults()
@@ -261,11 +282,12 @@ cfg.LOFTR.COARSE.TRAIN_PAD_NUM_GT_MIN = 0
 cfg.LOFTR.COARSE.NPE = [640, 640, 640, 640]  # training at 640 resolution
 cfg.freeze()
 
-dm     = AirSimDataModule(PAIR_ROOT, bs=1)
+dm     = AirSimDataModule(AIRSIM_ROOT, bs=1)
+#dm = PairDataModule(PAIR_ROOT, bs=1)
 model  = ConfHeadTrainer(lower_config(cfg), CKPT_PATH)
 
 trainer = pl.Trainer(
-    max_epochs=2, gpus=1, precision=16,
+    max_epochs=3, gpus=1, precision=16,
     accumulate_grad_batches=4,            # keeps LR steady
     num_sanity_val_steps=0,
     default_root_dir='logs/conf_heads'
