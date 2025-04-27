@@ -49,25 +49,25 @@ _CN.LOFTR.MATCH_FINE.LOCAL_REGRESS_SLICEDIM = 8
 # -- # coarse-level
 _CN.LOFTR.LOSS = CN()
 _CN.LOFTR.LOSS.COARSE_TYPE = 'focal'  # ['focal', 'cross_entropy']
-_CN.LOFTR.LOSS.COARSE_WEIGHT = 1.0
-_CN.LOFTR.LOSS.COARSE_SIGMOID_WEIGHT = 1.0
-_CN.LOFTR.LOSS.LOCAL_WEIGHT = 0.5
+_CN.LOFTR.LOSS.COARSE_WEIGHT = 0.0
+_CN.LOFTR.LOSS.COARSE_SIGMOID_WEIGHT = 0.0
+_CN.LOFTR.LOSS.LOCAL_WEIGHT = 0.0
 _CN.LOFTR.LOSS.COARSE_OVERLAP_WEIGHT = False
 _CN.LOFTR.LOSS.FINE_OVERLAP_WEIGHT = False
 _CN.LOFTR.LOSS.FINE_OVERLAP_WEIGHT2 = False
 # -- - -- # focal loss (coarse)
 _CN.LOFTR.LOSS.FOCAL_ALPHA = 0.25
 _CN.LOFTR.LOSS.FOCAL_GAMMA = 2.0
-_CN.LOFTR.LOSS.POS_WEIGHT = 1.0
-_CN.LOFTR.LOSS.NEG_WEIGHT = 1.0
+_CN.LOFTR.LOSS.POS_WEIGHT = 0.0
+_CN.LOFTR.LOSS.NEG_WEIGHT = 0.0
 
 # -- # fine-level
 _CN.LOFTR.LOSS.FINE_TYPE = 'l2_with_std'  # ['l2_with_std', 'l2']
-_CN.LOFTR.LOSS.FINE_WEIGHT = 1.0
+_CN.LOFTR.LOSS.FINE_WEIGHT = 0.0
 _CN.LOFTR.LOSS.FINE_CORRECT_THR = 1.0  # for filtering valid fine-level gts (some gt matches might fall out of the fine-level window)
 
 # confidence loss
-_CN.LOSS.CONF_WEIGHT = 0.1    # default; set 0 to disable
+_CN.LOFTR.LOSS.CONF_WEIGHT = 0.1    # default; set 0 to disable
 
 ##############  Dataset  ##############
 _CN.DATASET = CN()

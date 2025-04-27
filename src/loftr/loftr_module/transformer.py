@@ -113,18 +113,18 @@ class LocalFeatureTransformer(nn.Module):
         self.depth_conf = self.full_config['coarse'].get('depth_confidence', -1)
         n_layers = len(self.layers)
         print(f"LoFTR: {self.depth_conf=}, {n_layers=}")
-        if self.depth_conf > 0:          # -1  → disabled
-            self.conf_heads = nn.ModuleList(
-                [nn.Sequential(nn.Conv2d(self.d_model, 1, 1), nn.Sigmoid())
-                for _ in range(n_layers - 1)]        # no head for final layer
-            )
-            # same exponential schedule as LightGlue
-            self.conf_thr = [0.8 + 0.1 * np.exp(-4.0 * i / n_layers)
-                            for i in range(n_layers - 1)]
 
-            #  initialize confidence heads
-            for head in self.conf_heads:
-                nn.init.constant_(head[0].bias, 10.)   # sigmoid≈1 → early exit after layer 0
+        self.conf_heads = nn.ModuleList(
+            [nn.Sequential(nn.Conv2d(self.d_model, 1, 1), nn.Sigmoid())
+            for _ in range(n_layers - 1)]        # no head for final layer
+        )
+        # same exponential schedule as LightGlue
+        self.conf_thr = [0.8 + 0.1 * np.exp(-4.0 * i / n_layers)
+                        for i in range(n_layers - 1)]
+
+        #  initialize confidence heads
+        # for head in self.conf_heads:
+        #     nn.init.constant_(head[0].bias, 10.)   # sigmoid≈1 → early exit after layer 0
         
         self._reset_parameters()
 
@@ -165,7 +165,7 @@ class LocalFeatureTransformer(nn.Module):
             else:
                 raise KeyError
 
-            if self.training:                     # skip during inference
+            if data is not None and i < len(self.conf_heads):                     # skip during inference
                 with torch.no_grad():             # labels, no gradient
                     # 1. compute soft match matrix *now*
                     sim_now = torch.einsum(
